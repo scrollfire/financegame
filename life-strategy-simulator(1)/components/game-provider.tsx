@@ -13,17 +13,25 @@ import {
   CITIES,
   CREDIT_PENALTY_ON_DEBT,
   DEBT_MONTHLY_RATE,
-  DOWN_PAYMENT_RATE,
+  FINANCING_OPTIONS,
   INITIAL_PLAYER,
   LIFE_EVENTS,
+  MAINTENANCE_COST_PERCENT,
+  OCCUPANCY_VARIANCE,
+  PROPERTY_CONDITION_THRESHOLD,
   RELOCATION_COST,
-  SALE_PAYOUT_RATE,
+  calculateActualRent,
+  calculateMonthlyAppreciation,
+  calculateMortgagePayment,
+  calculateSellProceeds,
   getCity,
   getJob,
   type EventChoice,
+  type FinancingOption,
   type LifeEvent,
   type PlayerState,
   type Property,
+  type PropertyCondition,
 } from '@/lib/game-data'
 
 export type LogEntry = {
@@ -41,6 +49,8 @@ type GameContextValue = {
   monthlyRentIncome: number
   monthlyExpenses: number
   monthlyNet: number
+  monthlyMortgagePayment: number
+  monthlyMaintenanceExpense: number
   activeEvent: LifeEvent | null
   gameOver: boolean
   log: LogEntry[]
@@ -50,7 +60,7 @@ type GameContextValue = {
   advanceMonth: () => void
   resolveEvent: (choice: EventChoice) => void
   relocate: (cityName: string) => void
-  buyProperty: (cityName: string) => void
+  buyProperty: (cityName: string, financingOptionId: string) => void
   sellProperty: (propertyId: string) => void
   resetGame: () => void
 }
@@ -63,6 +73,13 @@ function clampScore(n: number) {
 
 function clampHappiness(n: number) {
   return Math.max(0, Math.min(100, Math.round(n)))
+}
+
+function updatePropertyCondition(property: Property): PropertyCondition {
+  if (property.conditionDegradation < 20) return 'excellent'
+  if (property.conditionDegradation < 40) return 'good'
+  if (property.conditionDegradation < 70) return 'fair'
+  return 'poor'
 }
 
 export function GameProvider({ children }: { children: ReactNode }) {
@@ -101,23 +118,34 @@ export function GameProvider({ children }: { children: ReactNode }) {
 
   const monthlyIncome = job ? job.salary / 12 : 0
   const monthlyRentIncome = player.propertiesOwned.reduce(
-    (sum, p) => sum + p.monthlyRent,
+    (sum, p) => sum + calculateActualRent(p),
+    0,
+  )
+  const monthlyMortgagePayment = player.propertiesOwned.reduce(
+    (sum, p) => sum + p.monthlyMortgagePayment,
+    0,
+  )
+  const monthlyMaintenanceExpense = player.propertiesOwned.reduce(
+    (sum, p) => sum + p.maintenanceReserve,
     0,
   )
   const premium = job && job.hasHealthBenefits ? job.monthlyPremium : 0
   const debtService = player.totalDebt * DEBT_MONTHLY_RATE
-  const monthlyExpenses = city.costOfLiving + premium + debtService
-  const monthlyNet =
-    monthlyIncome + monthlyRentIncome - monthlyExpenses
-  // Net worth counts the equity you hold in each property (your down payment),
-  // not the full sticker price, so buying and selling stay coherent.
-  const netWorth =
-    player.cash +
-    player.propertiesOwned.reduce(
-      (s, p) => s + p.purchasePrice * DOWN_PAYMENT_RATE,
-      0,
-    ) -
-    player.totalDebt
+  const monthlyExpenses =
+    city.costOfLiving +
+    premium +
+    debtService +
+    monthlyMortgagePayment +
+    monthlyMaintenanceExpense
+  const monthlyNet = monthlyIncome + monthlyRentIncome - monthlyExpenses
+
+  // Net worth = cash + equity in all properties - unsecured debt
+  const propertyEquity = player.propertiesOwned.reduce((sum, p) => {
+    const downPayment = p.purchasePrice * 0.2
+    const appreciation = p.currentMarketValue - p.purchasePrice
+    return sum + downPayment + appreciation - p.mortgageRemaining
+  }, 0)
+  const netWorth = player.cash + propertyEquity - player.totalDebt
 
   // Actions ------------------------------------------------------------------
   const startGame = useCallback(
@@ -149,14 +177,74 @@ export function GameProvider({ children }: { children: ReactNode }) {
     setPlayer((prev) => {
       const j = getJob(prev.currentJobId)
       const c = getCity(prev.currentCity)
+
+      // Calculate income & expenses
       const income = j ? j.salary / 12 : 0
-      const rent = prev.propertiesOwned.reduce((s, p) => s + p.monthlyRent, 0)
+      const rentIncome = prev.propertiesOwned.reduce(
+        (s, p) => s + calculateActualRent(p),
+        0,
+      )
       const prem = j && j.hasHealthBenefits ? j.monthlyPremium : 0
       const debtPay = prev.totalDebt * DEBT_MONTHLY_RATE
-      const net = income + rent - c.costOfLiving - prem - debtPay
+      const mortgagePayment = prev.propertiesOwned.reduce(
+        (s, p) => s + p.monthlyMortgagePayment,
+        0,
+      )
+      const maintenanceExpense = prev.propertiesOwned.reduce(
+        (s, p) => s + p.maintenanceReserve,
+        0,
+      )
+      const net =
+        income +
+        rentIncome -
+        c.costOfLiving -
+        prem -
+        debtPay -
+        mortgagePayment -
+        maintenanceExpense
+
+      // Update properties: appreciate, degrade condition, update occupancy
+      const updatedProperties = prev.propertiesOwned.map((p) => {
+        // Appreciate based on city + condition
+        const appreciation = calculateMonthlyAppreciation(p, c)
+        const newMarketValue = p.currentMarketValue + appreciation
+
+        // Random occupancy variance (0.85 - 1.0)
+        const variance = 0.85 + Math.random() * OCCUPANCY_VARIANCE
+        const newOccupancy = Math.min(1, Math.max(0.5, variance))
+
+        // Degrade condition if not maintaining
+        let newDegradation = p.conditionDegradation
+        if (p.maintenanceReserve === 0) {
+          newDegradation += 2 // Decay without maintenance
+        }
+
+        // Update mortgage (only if remaining)
+        let newMortgageRemaining = p.mortgageRemaining
+        if (p.mortgageRemaining > 0) {
+          // Apply interest
+          const monthlyRate = p.mortgageRate / 12
+          const interest = newMortgageRemaining * monthlyRate
+          const principal = p.monthlyMortgagePayment - interest
+          newMortgageRemaining = Math.max(0, newMortgageRemaining - principal)
+        }
+
+        const newCondition = updatePropertyCondition({
+          ...p,
+          conditionDegradation: newDegradation,
+        })
+
+        return {
+          ...p,
+          currentMarketValue: newMarketValue,
+          occupancyRate: newOccupancy,
+          conditionDegradation: newDegradation,
+          condition: newCondition,
+          mortgageRemaining: newMortgageRemaining,
+        }
+      })
 
       const newCash = prev.cash + net
-      // Debt shrinks slightly by the portion of the 1% payment beyond interest.
       const newDebt = Math.max(0, prev.totalDebt - debtPay * 0.5)
 
       let newMonth = prev.currentMonth + 1
@@ -172,13 +260,14 @@ export function GameProvider({ children }: { children: ReactNode }) {
         totalDebt: newDebt,
         currentMonth: newMonth,
         age: newAge,
+        propertiesOwned: updatedProperties,
       }
       return next
     })
 
     setMonthsElapsed((m) => m + 1)
 
-    // Log the ledger result using the freshly computed net.
+    // Log the ledger result
     addLog(
       `Monthly ledger settled. Net cash flow of ${
         monthlyNet >= 0 ? '+' : ''
@@ -317,32 +406,63 @@ export function GameProvider({ children }: { children: ReactNode }) {
   )
 
   const buyProperty = useCallback(
-    (cityName: string) => {
+    (cityName: string, financingOptionId: string) => {
       setPlayer((prev) => {
         const c = getCity(cityName)
-        const downPayment = Math.round(c.avgProperty * DOWN_PAYMENT_RATE)
+        const financing = FINANCING_OPTIONS.find((f) => f.id === financingOptionId)
+        if (!financing) return prev
+
+        const downPayment = Math.round(c.avgProperty * financing.downPaymentPercent)
         if (prev.cash < downPayment) return prev
+
+        // Calculate mortgage if not paying cash
+        const mortgageAmount = c.avgProperty - downPayment
+        const monthlyMortgagePayment =
+          mortgageAmount > 0
+            ? calculateMortgagePayment(mortgageAmount, financing.mortgageRate)
+            : 0
+
         const property: Property = {
           id: `prop_${cityName}_${prev.propertiesOwned.length + 1}_${Date.now()}`,
           city: cityName,
           purchasePrice: c.avgProperty,
+          currentMarketValue: c.avgProperty,
           monthlyRent: c.avgRent,
           boughtOnMonth: prev.currentMonth,
+          mortgageRemaining: mortgageAmount,
+          mortgageRate: financing.mortgageRate,
+          monthlyMortgagePayment,
+          maintenanceReserve: Math.round(
+            (c.avgProperty * MAINTENANCE_COST_PERCENT) / 12,
+          ),
+          occupancyRate: 0.95,
+          conditionDegradation: 0,
+          condition: 'excellent',
+          propertyType: 'residential',
         }
+
         const snapshot = { month: prev.currentMonth, age: prev.age }
+        const financingLabel =
+          financing.id === 'cash'
+            ? 'cash'
+            : financing.id === 'traditional'
+              ? `${financing.downPaymentPercent * 100}% down mortgage`
+              : `${financing.downPaymentPercent * 100}% down mortgage`
+
         setTimeout(
           () =>
             addLog(
-              `Bought a rental in ${cityName} with a ${downPayment.toLocaleString(
+              `Bought a rental in ${cityName} with ${financingLabel} (${downPayment.toLocaleString(
                 'en-US',
-              )} down payment. It now pays ${c.avgRent.toLocaleString(
+              )} down). It generates ${c.avgRent.toLocaleString(
                 'en-US',
-              )}/mo in rent.`,
+              )}/mo in rent (before maintenance).`,
               'positive',
               snapshot,
             ),
           0,
         )
+
         return {
           ...prev,
           cash: prev.cash - downPayment,
@@ -358,25 +478,33 @@ export function GameProvider({ children }: { children: ReactNode }) {
       setPlayer((prev) => {
         const property = prev.propertiesOwned.find((p) => p.id === propertyId)
         if (!property) return prev
-        const equity = property.purchasePrice * DOWN_PAYMENT_RATE
-        const payout = Math.round(equity * SALE_PAYOUT_RATE)
+
+        const proceeds = calculateSellProceeds(property)
         const snapshot = { month: prev.currentMonth, age: prev.age }
+
+        // Calculate gain/loss
+        const originalDownPayment = property.purchasePrice * 0.2
+        const gain = proceeds - originalDownPayment
+
         setTimeout(
           () =>
             addLog(
-              `Sold your ${property.city} rental for a ${payout.toLocaleString(
+              `Sold your ${property.city} rental for ${proceeds.toLocaleString(
                 'en-US',
-              )} payout. That's ${property.monthlyRent.toLocaleString(
+              )} (gain: ${gain >= 0 ? '+' : ''}${gain.toLocaleString(
                 'en-US',
-              )}/mo of rent gone.`,
-              'neutral',
+              )}). Lost ${property.monthlyRent.toLocaleString(
+                'en-US',
+              )}/mo rental income.`,
+              gain >= 0 ? 'positive' : 'negative',
               snapshot,
             ),
           0,
         )
+
         return {
           ...prev,
-          cash: prev.cash + payout,
+          cash: prev.cash + proceeds,
           propertiesOwned: prev.propertiesOwned.filter(
             (p) => p.id !== propertyId,
           ),
@@ -404,6 +532,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
       monthlyRentIncome,
       monthlyExpenses,
       monthlyNet,
+      monthlyMortgagePayment,
+      monthlyMaintenanceExpense,
       activeEvent,
       gameOver,
       log,
@@ -424,6 +554,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
       monthlyRentIncome,
       monthlyExpenses,
       monthlyNet,
+      monthlyMortgagePayment,
+      monthlyMaintenanceExpense,
       activeEvent,
       gameOver,
       log,
