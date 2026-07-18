@@ -17,10 +17,13 @@ export type PlayerState = {
   propertiesOwned: Property[]
   portfolio: InvestmentPortfolio
   ownedBusiness: OwnedBusiness | null
+  activeInsurance: InsurancePolicy[] // Policies player is currently paying for
+  insuranceDeclinedCount: Record<string, number> // Track policy declines to increase risk
 }
 
 export type PropertyCondition = 'excellent' | 'good' | 'fair' | 'poor'
 export type PropertyType = 'residential' | 'commercial'
+export type InsuranceType = 'portfolio' | 'business' | 'property_liability' | 'umbrella_liability' | 'tax_liability'
 
 export type Property = {
   id: string
@@ -74,6 +77,17 @@ export type OwnedBusiness = {
   // Financials
   mortgageRemaining: number // If financed
   monthlyMortgagePayment: number
+}
+
+export type InsurancePolicy = {
+  id: string
+  type: InsuranceType
+  label: string
+  yearlyCost: number // Monthly = yearlyCost / 12
+  coverageAmount: number // Max protection
+  deductible: number // Out-of-pocket before insurance kicks in
+  unlocksAtNetWorth: number // Net worth threshold to purchase
+  description: string
 }
 
 export type Job = {
@@ -155,6 +169,62 @@ export const FINANCING_OPTIONS: FinancingOption[] = [
     downPaymentPercent: 0.1,
     mortgageRate: 0.065,
     description: 'Save cash now, but higher rates and PMI. Risky.',
+  },
+]
+
+// ============================================================================
+// Insurance Policies
+// ============================================================================
+export const INSURANCE_POLICIES: InsurancePolicy[] = [
+  {
+    id: 'portfolio_insurance',
+    type: 'portfolio',
+    label: 'Portfolio Protection',
+    yearlyCost: 2000,
+    coverageAmount: 500000, // Covers fraud, embezzlement, scams
+    deductible: 5000,
+    unlocksAtNetWorth: 100000,
+    description: 'Protects against investment fraud, Ponzi schemes, and advisor embezzlement. Coverage up to portfolio value.',
+  },
+  {
+    id: 'business_insurance',
+    type: 'business',
+    label: 'Business Protection',
+    yearlyCost: 1500,
+    coverageAmount: 200000, // Covers partner embezzlement, key-person losses
+    deductible: 3000,
+    unlocksAtNetWorth: 200000,
+    description: 'Covers partner embezzlement, key-person losses, and business interruption.',
+  },
+  {
+    id: 'property_liability',
+    type: 'property_liability',
+    label: 'Property Liability',
+    yearlyCost: 3500,
+    coverageAmount: 400000, // Covers tenant lawsuits
+    deductible: 5000,
+    unlocksAtNetWorth: 50000,
+    description: 'Protects against tenant lawsuits, negligence claims, and property damage litigation.',
+  },
+  {
+    id: 'umbrella_liability',
+    type: 'umbrella_liability',
+    label: 'Umbrella Liability',
+    yearlyCost: 5000,
+    coverageAmount: 1000000, // Catch-all for lawsuits over $1M
+    deductible: 10000,
+    unlocksAtNetWorth: 500000,
+    description: 'Protects against catastrophic lawsuits exceeding $1M. Last line of defense.',
+  },
+  {
+    id: 'tax_liability',
+    type: 'tax_liability',
+    label: 'Tax Liability Protection',
+    yearlyCost: 5000,
+    coverageAmount: 400000, // Covers IRS audit penalties & back taxes
+    deductible: 8000,
+    unlocksAtNetWorth: 1000000,
+    description: 'Covers IRS audit penalties, back taxes, and legal defense. Only for high-net-worth players.',
   },
 ]
 
@@ -284,6 +354,8 @@ export const INITIAL_PLAYER: PlayerState = {
     bondsValue: 0,
   },
   ownedBusiness: null,
+  activeInsurance: [],
+  insuranceDeclinedCount: {},
 }
 
 // ============================================================================
@@ -687,6 +759,127 @@ export const LIFE_EVENTS: LifeEvent[] = [
         description: 'Cut losses, move capital to stronger market.',
         cash: 50000,
         happiness: 2,
+      },
+    ],
+  },
+  // ========== "MORE MONEY MORE PROBLEMS" EVENTS ==========
+  {
+    id: 'evt_ponzi_scheme',
+    title: 'Investment Advisor Scandal',
+    emoji: '💼',
+    prompt:
+      'Your investment advisor is exposed in a Ponzi scheme. Federal investigators freeze accounts.',
+    minNetWorth: 100000,
+    choices: [
+      {
+        label: 'Wait for SIPC recovery (insured)',
+        description: 'If you have portfolio insurance, recover your funds. Otherwise, lose 40%.',
+        cash: -100000, // Placeholder — replaced if insured
+        portfolioImpact: 0.6, // Lose 40% without insurance
+        creditScore: -25,
+        happiness: -20,
+      },
+      {
+        label: 'Liquidate and move on',
+        description: 'Accept the loss and shift to safer investments.',
+        portfolioImpact: 0.5, // Lose 50%
+        happiness: -25,
+        creditScore: -30,
+      },
+    ],
+  },
+  {
+    id: 'evt_partner_embezzle',
+    title: 'Partner Embezzlement',
+    emoji: '😡',
+    prompt:
+      'Your business partner has been stealing from the company for months. You discover the theft.',
+    minNetWorth: 200000,
+    choices: [
+      {
+        label: 'Prosecute and recover (if insured)',
+        description: 'Business insurance covers most losses. Without it, lose 30% of business value.',
+        cash: -60000, // Placeholder — depends on insurance
+        creditScore: -20,
+        happiness: -15,
+      },
+      {
+        label: 'Settle quietly to avoid scandal',
+        description: 'Pay them off and move forward, but avoid reputation damage.',
+        cash: -150000, // Direct settlement
+        happiness: -10,
+        creditScore: 10,
+      },
+    ],
+  },
+  {
+    id: 'evt_catastrophic_lawsuit',
+    title: 'Catastrophic Lawsuit',
+    emoji: '⚠️',
+    prompt:
+      'Someone was injured on your property. They\'re suing for $800,000. Your lawyer thinks they might win.',
+    minNetWorth: 500000,
+    choices: [
+      {
+        label: 'Settle with insurance (if insured)',
+        description: 'Umbrella liability covers most/all. Without it, you\'re ruined.',
+        cash: -200000, // Deductible + uninsured portion
+        creditScore: -40,
+        happiness: -30,
+      },
+      {
+        label: 'Fight in court',
+        description: 'Could win, but legal fees alone could be $100k+.',
+        cash: -250000,
+        creditScore: -50,
+        happiness: -35,
+      },
+    ],
+  },
+  {
+    id: 'evt_tax_audit',
+    title: 'IRS Audit — Major Penalties',
+    emoji: '🧾',
+    prompt:
+      'The IRS audited your business. They claim you owe $250,000 in back taxes + penalties.',
+    minNetWorth: 1000000,
+    choices: [
+      {
+        label: 'Pay and move on (if insured)',
+        description: 'Tax liability insurance covers most. Otherwise, liquidate assets at loss.',
+        cash: -200000, // Liquidation + penalties (uninsured worse)
+        creditScore: -35,
+        happiness: -25,
+      },
+      {
+        label: 'Hire accountant to fight it',
+        description: 'Could reduce the bill, but costs $50k in legal fees upfront.',
+        cash: -150000,
+        creditScore: -20,
+        happiness: -20,
+      },
+    ],
+  },
+  {
+    id: 'evt_business_failure',
+    title: 'Market Collapse — Business Fails',
+    emoji: '📉',
+    prompt:
+      'Recession hits hard. Your business can\'t sustain operations. You must close.',
+    minNetWorth: 500000,
+    choices: [
+      {
+        label: 'Graceful exit (if insured)',
+        description: 'Business interruption insurance recovers 50-75%. Without it, total loss.',
+        cash: -300000, // Partial recovery if insured
+        creditScore: -30,
+        happiness: -20,
+      },
+      {
+        label: 'Bankruptcy filing',
+        description: 'Protect remaining assets, but credit score tanks.',
+        creditScore: -100,
+        happiness: -30,
       },
     ],
   },
