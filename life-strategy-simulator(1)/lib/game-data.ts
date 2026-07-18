@@ -15,6 +15,8 @@ export type PlayerState = {
   currentCity: string
   currentJobId: string | null
   propertiesOwned: Property[]
+  portfolio: InvestmentPortfolio
+  ownedBusiness: OwnedBusiness | null
 }
 
 export type PropertyCondition = 'excellent' | 'good' | 'fair' | 'poor'
@@ -27,20 +29,51 @@ export type Property = {
   currentMarketValue: number // Appreciates/depreciates over time
   monthlyRent: number // Base monthly rent
   boughtOnMonth: number
-  
+
   // Financing details
   mortgageRemaining: number // How much you still owe (0 = fully owned)
   mortgageRate: number // Annual interest rate (e.g., 0.05 = 5%)
   monthlyMortgagePayment: number // Fixed monthly payment (0 if no mortgage)
-  
+
   // Maintenance & condition
   maintenanceReserve: number // Monthly budget for maintenance
   occupancyRate: number // 0-1, percentage of time rented out
   conditionDegradation: number // Tracks how much condition has degraded (0-100)
-  
+
   // Metadata
   condition: PropertyCondition // Affects appreciation and maintenance
   propertyType: PropertyType // Different mechanics later
+}
+
+export type InvestmentPortfolio = {
+  indexFunds: number // Dollar amount invested
+  stocks: number // Dollar amount invested
+  bonds: number // Dollar amount invested
+  indexFundsValue: number // Current value
+  stocksValue: number // Current value (volatile)
+  bondsValue: number // Current value
+}
+
+export type BusinessType = 'coffee_shop' | 'property_management' | 'consulting'
+
+export type OwnedBusiness = {
+  id: string
+  type: BusinessType
+  boughtOnMonth: number
+  purchasePrice: number
+  
+  // Monthly operations
+  monthlyRevenue: number // Base revenue
+  monthlyExpenses: number // Operating costs
+  
+  // State
+  staffLevel: number // 1-5 (affects revenue & expenses)
+  priceStrategy: 'low' | 'medium' | 'premium' // Affects occupancy/volume
+  marketReputation: number // 0-100 (affects revenue)
+  
+  // Financials
+  mortgageRemaining: number // If financed
+  monthlyMortgagePayment: number
 }
 
 export type Job = {
@@ -62,6 +95,8 @@ export type City = {
   avgRent: number
   vibe: string
   appreciationRate: number // Monthly appreciation (e.g., 0.003 = 3.6% annual)
+  avgCommercialProperty?: number // For commercial properties
+  avgCommercialRent?: number
 }
 
 export type EventChoice = {
@@ -75,6 +110,8 @@ export type EventChoice = {
   // If true and the player cannot afford the cash cost out of pocket,
   // the shortfall is pushed to debt and credit score drops 40 points.
   canGoToDebt?: boolean
+  // Portfolio impact (for market events)
+  portfolioImpact?: number // Multiplier: 0.9 = 10% loss, 1.1 = 10% gain
 }
 
 export type LifeEvent = {
@@ -83,6 +120,7 @@ export type LifeEvent = {
   emoji: string
   prompt: string
   choices: EventChoice[]
+  minNetWorth?: number // Only triggers if player has this net worth
 }
 
 // ============================================================================
@@ -120,9 +158,111 @@ export const FINANCING_OPTIONS: FinancingOption[] = [
   },
 ]
 
-// ----------------------------------------------------------------------------
+// ============================================================================
+// Complexity Unlock Tresholds
+// ============================================================================
+export const UNLOCK_THRESHOLDS = {
+  COMMERCIAL_RE: 50000, // $50k net worth
+  STOCK_MARKET: 100000, // $100k net worth
+  BUSINESS: 200000, // $200k net worth
+}
+
+// ============================================================================
+// Commercial Real Estate
+// ============================================================================
+export const COMMERCIAL_PROPERTIES = [
+  {
+    city: 'Austin',
+    type: 'office' as const,
+    price: 500000,
+    baseRent: 5000,
+    capRate: 0.08,
+  },
+  {
+    city: 'Austin',
+    type: 'retail' as const,
+    price: 600000,
+    baseRent: 6000,
+    capRate: 0.085,
+  },
+  {
+    city: 'New York',
+    type: 'office' as const,
+    price: 1500000,
+    baseRent: 12000,
+    capRate: 0.07,
+  },
+  {
+    city: 'New York',
+    type: 'retail' as const,
+    price: 1800000,
+    baseRent: 15000,
+    capRate: 0.075,
+  },
+  {
+    city: 'Seattle',
+    type: 'office' as const,
+    price: 800000,
+    baseRent: 7000,
+    capRate: 0.08,
+  },
+  {
+    city: 'Seattle',
+    type: 'retail' as const,
+    price: 900000,
+    baseRent: 8000,
+    capRate: 0.085,
+  },
+]
+
+// ============================================================================
+// Stock Market Asset Classes
+// ============================================================================
+export const STOCK_MARKET_ASSETS = {
+  indexFunds: {
+    label: 'Index Funds (S&P 500)',
+    description: 'Safe, ~7% annual return',
+    volatility: 0.02, // Low volatility
+    baseReturn: 0.07,
+  },
+  stocks: {
+    label: 'Individual Stocks',
+    description: 'Volatile, potential high return',
+    volatility: 0.3, // High volatility
+    baseReturn: 0.12,
+  },
+  bonds: {
+    label: 'Bonds',
+    description: 'Very safe, ~3% return',
+    volatility: 0.01,
+    baseReturn: 0.03,
+  },
+}
+
+// ============================================================================
+// Businesses
+// ============================================================================
+export const BUSINESS_TYPES: Record<BusinessType, { label: string; price: number; description: string }> = {
+  coffee_shop: {
+    label: 'Coffee Shop',
+    price: 150000,
+    description: 'High volume, low margin. Active management required.',
+  },
+  property_management: {
+    label: 'Property Management Company',
+    price: 200000,
+    description: 'Manage rentals for others. More passive once established.',
+  },
+  consulting: {
+    label: 'Consulting Firm',
+    price: 100000,
+    description: 'Service-based. Scales with your effort and reputation.',
+  },
+}
+
+// ============================================================================
 // Initial player state
-// ----------------------------------------------------------------------------
+// ============================================================================
 export const INITIAL_PLAYER: PlayerState = {
   age: 22,
   currentMonth: 1,
@@ -135,11 +275,20 @@ export const INITIAL_PLAYER: PlayerState = {
   currentCity: 'Austin',
   currentJobId: null,
   propertiesOwned: [],
+  portfolio: {
+    indexFunds: 0,
+    stocks: 0,
+    bonds: 0,
+    indexFundsValue: 0,
+    stocksValue: 0,
+    bondsValue: 0,
+  },
+  ownedBusiness: null,
 }
 
-// ----------------------------------------------------------------------------
+// ============================================================================
 // Job registry — strategic utility tradeoffs
-// ----------------------------------------------------------------------------
+// ============================================================================
 export const JOBS: Job[] = [
   {
     id: 'job_tech',
@@ -175,9 +324,9 @@ export const JOBS: Job[] = [
   },
 ]
 
-// ----------------------------------------------------------------------------
+// ============================================================================
 // City / real-estate database — 4 disparate macro-economies
-// ----------------------------------------------------------------------------
+// ============================================================================
 export const CITIES: City[] = [
   {
     id: 'austin',
@@ -189,6 +338,8 @@ export const CITIES: City[] = [
     avgRent: 1200,
     vibe: 'A steady middle path — affordable enough to build, hot enough to grow.',
     appreciationRate: 0.003, // 3.6% annually
+    avgCommercialProperty: 500000,
+    avgCommercialRent: 5000,
   },
   {
     id: 'newyork',
@@ -200,6 +351,8 @@ export const CITIES: City[] = [
     avgRent: 3500,
     vibe: 'Everything costs more here, but the rent checks are enormous.',
     appreciationRate: 0.0025, // 3% annually (mature market)
+    avgCommercialProperty: 1500000,
+    avgCommercialRent: 12000,
   },
   {
     id: 'indianapolis',
@@ -211,6 +364,8 @@ export const CITIES: City[] = [
     avgRent: 700,
     vibe: 'Cheap to live and cheap to buy — the easiest first rung on the ladder.',
     appreciationRate: 0.002, // 2.4% annually
+    avgCommercialProperty: 250000,
+    avgCommercialRent: 2500,
   },
   {
     id: 'seattle',
@@ -222,12 +377,14 @@ export const CITIES: City[] = [
     avgRent: 2400,
     vibe: 'Premium tech-driven market with strong appreciation potential.',
     appreciationRate: 0.0035, // 4.2% annually
+    avgCommercialProperty: 800000,
+    avgCommercialRent: 7000,
   },
 ]
 
-// ----------------------------------------------------------------------------
+// ============================================================================
 // Life events — random branching decisions
-// ----------------------------------------------------------------------------
+// ============================================================================
 export const LIFE_EVENTS: LifeEvent[] = [
   {
     id: 'evt_car',
@@ -439,11 +596,105 @@ export const LIFE_EVENTS: LifeEvent[] = [
       },
     ],
   },
+  // ========== MARKET EVENTS (minNetWorth unlocks) ==========
+  {
+    id: 'evt_tech_crash',
+    title: 'Tech Stocks Plummet',
+    emoji: '📉',
+    prompt:
+      'Breaking news: Major tech selloff rocks the market. Your portfolio takes a hit.',
+    minNetWorth: 100000,
+    choices: [
+      {
+        label: 'Hold and weather the storm',
+        description: 'Stay invested. Markets recover.',
+        portfolioImpact: 0.85, // 15% loss
+        happiness: -8,
+      },
+      {
+        label: 'Panic sell everything',
+        description: 'Lock in losses now and move to bonds.',
+        portfolioImpact: 0.9, // 10% loss
+        cash: 5000, // Move some to cash
+        happiness: -12,
+      },
+    ],
+  },
+  {
+    id: 'evt_market_surge',
+    title: 'Bull Market Boom',
+    emoji: '📈',
+    prompt:
+      'Prosperity strikes! Economic growth drives strong market performance.',
+    minNetWorth: 100000,
+    choices: [
+      {
+        label: 'Rebalance into growth stocks',
+        description: 'Ride the wave with aggressive positioning.',
+        portfolioImpact: 1.15, // 15% gain
+        happiness: 8,
+      },
+      {
+        label: 'Take profits and diversify',
+        description: 'Lock in gains, move to bonds.',
+        portfolioImpact: 1.08, // 8% gain
+        cash: 10000,
+        happiness: 6,
+      },
+    ],
+  },
+  {
+    id: 'evt_tenant_trouble',
+    title: 'Tenant Lawsuit',
+    emoji: '⚖️',
+    prompt:
+      'A tenant is suing you for negligent maintenance. Your lawyer quotes $8,000 to settle.',
+    minNetWorth: 50000,
+    choices: [
+      {
+        label: 'Settle and improve maintenance',
+        description: 'Pay now, avoid court. Your properties benefit.',
+        cash: -8000,
+        canGoToDebt: true,
+        happiness: -5,
+      },
+      {
+        label: 'Fight it in court',
+        description: 'Risk losing more, or winning clean.',
+        cash: -12000, // Assume worst case
+        canGoToDebt: true,
+        creditScore: -20,
+        happiness: -15,
+      },
+    ],
+  },
+  {
+    id: 'evt_commercial_downturn',
+    title: 'Commercial Real Estate Downturn',
+    emoji: '🏢',
+    prompt:
+      'Office vacancy rates are rising. Commercial property values are declining.',
+    minNetWorth: 200000,
+    choices: [
+      {
+        label: 'Hold and collect rent',
+        description: 'Long term, markets recover. But rent declines.',
+        cash: -3000, // Lower rent this month
+        happiness: -5,
+      },
+      {
+        label: 'Sell and reinvest residential',
+        description: 'Cut losses, move capital to stronger market.',
+        cash: 50000,
+        happiness: 2,
+      },
+    ],
+  },
 ]
 
-// ----------------------------------------------------------------------------
+// ============================================================================
 // Real Estate Constants
-// ----------------------------------------------------------------------------
+// ============================================================================
 export const RELOCATION_COST = 2000
 export const DEBT_MONTHLY_RATE = 0.01 // 1% of remaining debt per month
 export const CREDIT_PENALTY_ON_DEBT = 40
@@ -483,7 +734,7 @@ export function calculateMonthlyAppreciation(
         : property.condition === 'fair'
           ? 0.9
           : 0.6
-  
+
   const monthlyRate = city.appreciationRate * conditionMultiplier
   return property.currentMarketValue * monthlyRate
 }
@@ -516,6 +767,14 @@ export function conditionLabel(condition: PropertyCondition): string {
 // Maintenance reserve recommendation
 export function recommendedMaintenanceReserve(property: Property): number {
   return Math.round((property.currentMarketValue * MAINTENANCE_COST_PERCENT) / 12)
+}
+
+// Calculate portfolio value with market returns
+export function calculatePortfolioValue(portfolio: InvestmentPortfolio, marketMultiplier: number = 1.0): number {
+  const indexValue = portfolio.indexFundsValue * marketMultiplier
+  const stockValue = portfolio.stocksValue * marketMultiplier
+  const bondValue = portfolio.bondsValue * marketMultiplier
+  return indexValue + stockValue + bondValue
 }
 
 // ============================================================================
