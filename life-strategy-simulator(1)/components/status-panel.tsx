@@ -9,9 +9,20 @@ import {
   TrendingDown,
   Building2,
   Smile,
+  Home,
+  Zap,
 } from 'lucide-react'
 import { useGame } from '@/components/game-provider'
-import { formatMoney, getJob, happinessLabel, MONTH_NAMES } from '@/lib/game-data'
+import {
+  formatMoney,
+  getJob,
+  happinessLabel,
+  MONTH_NAMES,
+  calculatePropertyEquity,
+  calculateSellProceeds,
+  recommendedMaintenanceReserve,
+  conditionLabel,
+} from '@/lib/game-data'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -40,6 +51,21 @@ function happinessBar(h: number) {
   return '[&>div]:bg-destructive'
 }
 
+function conditionColor(condition: string) {
+  switch (condition) {
+    case 'excellent':
+      return 'text-[oklch(0.52_0.13_155)]'
+    case 'good':
+      return 'text-[oklch(0.68_0.15_75)]'
+    case 'fair':
+      return 'text-[oklch(0.65_0.15_50)]'
+    case 'poor':
+      return 'text-destructive'
+    default:
+      return 'text-card-foreground'
+  }
+}
+
 export function StatusPanel() {
   const {
     player,
@@ -48,6 +74,8 @@ export function StatusPanel() {
     monthlyRentIncome,
     monthlyExpenses,
     monthlyNet,
+    monthlyMortgagePayment,
+    monthlyMaintenanceExpense,
     sellProperty,
   } = useGame()
 
@@ -152,9 +180,15 @@ export function StatusPanel() {
           <div className="my-2 border-t border-dashed border-border" />
           <Row
             label="Cost of living"
-            value={-(monthlyExpenses - premium - debtService)}
+            value={-(monthlyExpenses - premium - debtService - monthlyMortgagePayment - monthlyMaintenanceExpense)}
           />
           {premium > 0 && <Row label="Health premium" value={-premium} />}
+          {monthlyMortgagePayment > 0 && (
+            <Row label="Mortgage payments" value={-monthlyMortgagePayment} />
+          )}
+          {monthlyMaintenanceExpense > 0 && (
+            <Row label="Property maintenance" value={-monthlyMaintenanceExpense} />
+          )}
           <Row label="Debt service (1%)" value={-debtService} />
           <div className="my-2 border-t border-border" />
           <div className="flex items-center justify-between">
@@ -181,36 +215,118 @@ export function StatusPanel() {
           <h3 className="font-display text-sm font-semibold text-card-foreground">
             Property Portfolio
           </h3>
+          {player.propertiesOwned.length > 0 && (
+            <Badge variant="secondary" className="ml-auto text-xs">
+              {player.propertiesOwned.length}
+            </Badge>
+          )}
         </div>
         {player.propertiesOwned.length === 0 ? (
           <p className="mt-2 text-xs text-muted-foreground">
             No properties yet. Buy a rental from the map to build passive income.
           </p>
         ) : (
-          <ul className="mt-3 space-y-2">
+          <ul className="mt-3 space-y-3">
             {player.propertiesOwned.map((p) => {
-              const payout = Math.round(p.purchasePrice * 0.2 * 1.05)
+              const equity = calculatePropertyEquity(p)
+              const proceeds = calculateSellProceeds(p)
+              const gain = proceeds - (p.purchasePrice * 0.2)
+              const recommended = recommendedMaintenanceReserve(p)
+
               return (
                 <li
                   key={p.id}
-                  className="rounded-lg bg-secondary px-3 py-2 text-xs"
+                  className="rounded-lg border border-border/50 bg-secondary/40 p-3 text-xs"
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-secondary-foreground">
-                      {p.city}
-                    </span>
-                    <span className="font-mono text-primary">
-                      +{formatMoney(p.monthlyRent)}/mo
-                    </span>
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-secondary-foreground">
+                          {p.city}
+                        </span>
+                        <Badge
+                          variant="outline"
+                          className={`text-[10px] ${conditionColor(p.condition)}`}
+                        >
+                          {conditionLabel(p.condition)}
+                        </Badge>
+                      </div>
+                      <div className="mt-2 space-y-1 text-[10px] text-muted-foreground">
+                        <div className="flex items-center justify-between">
+                          <span>Value:</span>
+                          <span className="font-mono text-secondary-foreground">
+                            {formatMoney(p.currentMarketValue)}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span>Equity:</span>
+                          <span className="font-mono text-primary">
+                            {formatMoney(equity)}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span>Occupancy:</span>
+                          <span className="font-mono">
+                            {(p.occupancyRate * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span>Actual rent:</span>
+                          <span className="font-mono text-primary">
+                            +{formatMoney(p.monthlyRent * p.occupancyRate)}/mo
+                          </span>
+                        </div>
+                        {p.mortgageRemaining > 0 && (
+                          <>
+                            <div className="my-1 border-t border-border/30" />
+                            <div className="flex items-center justify-between">
+                              <span>Mortgage remaining:</span>
+                              <span className="font-mono text-destructive">
+                                {formatMoney(p.mortgageRemaining)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span>Monthly payment:</span>
+                              <span className="font-mono">
+                                {formatMoney(p.monthlyMortgagePayment)}/mo
+                              </span>
+                            </div>
+                          </>
+                        )}
+                        {p.maintenanceReserve > 0 && (
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-1">
+                              <Zap className="size-3" /> Maintenance:
+                            </span>
+                            <span
+                              className={`font-mono ${
+                                p.maintenanceReserve >= recommended
+                                  ? 'text-primary'
+                                  : 'text-destructive'
+                              }`}
+                            >
+                              {formatMoney(p.maintenanceReserve)}/mo
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="mt-2 h-7 w-full text-xs"
-                    onClick={() => sellProperty(p.id)}
-                  >
-                    Sell for {formatMoney(payout)}
-                  </Button>
+                  <div className="mt-3 flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 text-xs"
+                      onClick={() => sellProperty(p.id)}
+                    >
+                      Sell {proceeds > 0 && `for ${formatMoney(proceeds)}`}
+                    </Button>
+                    {gain > 0 && (
+                      <div className="flex items-center justify-center rounded bg-primary/10 px-2 py-1 text-[10px] font-medium text-primary">
+                        +{formatMoney(gain)}
+                      </div>
+                    )}
+                  </div>
                 </li>
               )
             })}
