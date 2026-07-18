@@ -20,9 +20,11 @@ import {
   OCCUPANCY_VARIANCE,
   PROPERTY_CONDITION_THRESHOLD,
   RELOCATION_COST,
+  UNLOCK_THRESHOLDS,
   calculateActualRent,
   calculateMonthlyAppreciation,
   calculateMortgagePayment,
+  calculatePortfolioValue,
   calculateSellProceeds,
   getCity,
   getJob,
@@ -51,6 +53,12 @@ type GameContextValue = {
   monthlyNet: number
   monthlyMortgagePayment: number
   monthlyMaintenanceExpense: number
+  monthlyBusinessIncome: number
+  monthlyInvestmentIncome: number
+  portfolioValue: number
+  unlockedCommercial: boolean
+  unlockedStockMarket: boolean
+  unlockedBusiness: boolean
   activeEvent: LifeEvent | null
   gameOver: boolean
   log: LogEntry[]
@@ -129,6 +137,12 @@ export function GameProvider({ children }: { children: ReactNode }) {
     (sum, p) => sum + p.maintenanceReserve,
     0,
   )
+  const monthlyBusinessIncome = player.ownedBusiness
+    ? Math.max(0, player.ownedBusiness.monthlyRevenue - player.ownedBusiness.monthlyExpenses - player.ownedBusiness.monthlyMortgagePayment)
+    : 0
+  const portfolioValue = calculatePortfolioValue(player.portfolio)
+  const monthlyInvestmentIncome = portfolioValue * 0.07 / 12 // Assume ~7% annual return on average
+  
   const premium = job && job.hasHealthBenefits ? job.monthlyPremium : 0
   const debtService = player.totalDebt * DEBT_MONTHLY_RATE
   const monthlyExpenses =
@@ -137,15 +151,23 @@ export function GameProvider({ children }: { children: ReactNode }) {
     debtService +
     monthlyMortgagePayment +
     monthlyMaintenanceExpense
-  const monthlyNet = monthlyIncome + monthlyRentIncome - monthlyExpenses
+  const monthlyNet = monthlyIncome + monthlyRentIncome + monthlyBusinessIncome + monthlyInvestmentIncome - monthlyExpenses
 
-  // Net worth = cash + equity in all properties - unsecured debt
+  // Net worth = cash + equity in all properties + portfolio + business value - unsecured debt
   const propertyEquity = player.propertiesOwned.reduce((sum, p) => {
     const downPayment = p.purchasePrice * 0.2
     const appreciation = p.currentMarketValue - p.purchasePrice
     return sum + downPayment + appreciation - p.mortgageRemaining
   }, 0)
-  const netWorth = player.cash + propertyEquity - player.totalDebt
+  const businessEquity = player.ownedBusiness
+    ? player.ownedBusiness.purchasePrice - player.ownedBusiness.mortgageRemaining
+    : 0
+  const netWorth = player.cash + propertyEquity + portfolioValue + businessEquity - player.totalDebt
+
+  // Unlock system
+  const unlockedCommercial = netWorth >= UNLOCK_THRESHOLDS.COMMERCIAL_RE
+  const unlockedStockMarket = netWorth >= UNLOCK_THRESHOLDS.STOCK_MARKET
+  const unlockedBusiness = netWorth >= UNLOCK_THRESHOLDS.BUSINESS
 
   // Actions ------------------------------------------------------------------
   const startGame = useCallback(
@@ -194,9 +216,46 @@ export function GameProvider({ children }: { children: ReactNode }) {
         (s, p) => s + p.maintenanceReserve,
         0,
       )
+      
+      // Business income
+      let businessIncome = 0
+      let updatedBusiness = prev.ownedBusiness
+      if (prev.ownedBusiness) {
+        const monthlyProfit = Math.max(
+          0,
+          prev.ownedBusiness.monthlyRevenue -
+            prev.ownedBusiness.monthlyExpenses -
+            prev.ownedBusiness.monthlyMortgagePayment
+        )
+        businessIncome = monthlyProfit
+        
+        // Apply slight random variance to reputation (affects next month's revenue)
+        const reputationChange = (Math.random() - 0.5) * 5
+        updatedBusiness = {
+          ...prev.ownedBusiness,
+          marketReputation: Math.max(0, Math.min(100, prev.ownedBusiness.marketReputation + reputationChange)),
+        }
+      }
+      
+      // Portfolio appreciation
+      let updatedPortfolio = prev.portfolio
+      const portfolioReturn = (Math.random() - 0.5) * 0.1 + 0.07 // ~7% base with variance
+      updatedPortfolio = {
+        indexFunds: prev.portfolio.indexFunds,
+        stocks: prev.portfolio.stocks,
+        bonds: prev.portfolio.bonds,
+        indexFundsValue: Math.round(prev.portfolio.indexFundsValue * (1 + portfolioReturn * 0.01)),
+        stocksValue: Math.round(prev.portfolio.stocksValue * (1 + portfolioReturn * 0.05)), // More volatile
+        bondsValue: Math.round(prev.portfolio.bondsValue * (1 + portfolioReturn * 0.003)), // Less volatile
+      }
+      
+      const investmentIncome = (updatedPortfolio.indexFundsValue + updatedPortfolio.stocksValue + updatedPortfolio.bondsValue) * 0.07 / 12
+
       const net =
         income +
-        rentIncome -
+        rentIncome +
+        businessIncome +
+        investmentIncome -
         c.costOfLiving -
         prem -
         debtPay -
@@ -261,6 +320,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
         currentMonth: newMonth,
         age: newAge,
         propertiesOwned: updatedProperties,
+        portfolio: updatedPortfolio,
+        ownedBusiness: updatedBusiness,
       }
       return next
     })
@@ -276,10 +337,18 @@ export function GameProvider({ children }: { children: ReactNode }) {
       { month: player.currentMonth, age: player.age },
     )
 
-    // Trigger a random life event after settling the ledger.
-    const evt = LIFE_EVENTS[Math.floor(Math.random() * LIFE_EVENTS.length)]
-    setActiveEvent(evt)
-  }, [activeEvent, gameOver, addLog, monthlyNet, player.currentMonth, player.age])
+    // Trigger a random life event after settling the ledger
+    // Filter events by net worth unlock
+    const eligibleEvents = LIFE_EVENTS.filter((evt) => {
+      if (!evt.minNetWorth) return true // Always eligible
+      return netWorth >= evt.minNetWorth
+    })
+    
+    if (eligibleEvents.length > 0) {
+      const evt = eligibleEvents[Math.floor(Math.random() * eligibleEvents.length)]
+      setActiveEvent(evt)
+    }
+  }, [activeEvent, gameOver, addLog, monthlyNet, player.currentMonth, player.age, netWorth])
 
   const resolveEvent = useCallback(
     (choice: EventChoice) => {
@@ -289,6 +358,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
         let score = prev.creditScore
         let happiness = prev.happiness
         let hitDebt = false
+        let portfolio = prev.portfolio
 
         // Direct debt adjustments (e.g. payment plan, paying down debt).
         if (choice.debt) {
@@ -299,6 +369,16 @@ export function GameProvider({ children }: { children: ReactNode }) {
         }
         if (choice.happiness) {
           happiness += choice.happiness
+        }
+
+        // Portfolio impact (for market events)
+        if (choice.portfolioImpact) {
+          portfolio = {
+            ...prev.portfolio,
+            indexFundsValue: Math.round(prev.portfolio.indexFundsValue * choice.portfolioImpact),
+            stocksValue: Math.round(prev.portfolio.stocksValue * choice.portfolioImpact),
+            bondsValue: Math.round(prev.portfolio.bondsValue * choice.portfolioImpact),
+          }
         }
 
         // Cash adjustments. If a cost can't be afforded out of pocket and the
@@ -337,11 +417,17 @@ export function GameProvider({ children }: { children: ReactNode }) {
             `— couldn't cover it in cash, so the shortfall was added to debt and your credit score dropped ${CREDIT_PENALTY_ON_DEBT} points.`,
           )
         }
+        if (choice.portfolioImpact) {
+          const impactPercent = Math.round((choice.portfolioImpact - 1) * 100)
+          parts.push(
+            `— your portfolio ${impactPercent >= 0 ? 'gained' : 'lost'} ${Math.abs(impactPercent)}%.`,
+          )
+        }
         setTimeout(
           () =>
             addLog(
               parts.join(' '),
-              hitDebt || (choice.cash ?? 0) < 0 ? 'negative' : 'positive',
+              hitDebt || (choice.cash ?? 0) < 0 ? 'negative' : choice.portfolioImpact && choice.portfolioImpact < 1 ? 'negative' : 'positive',
               snapshot,
             ),
           0,
@@ -355,6 +441,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
           happiness: clampHappiness(happiness),
           isMarried,
           hasPet,
+          portfolio,
         }
       })
 
@@ -534,6 +621,12 @@ export function GameProvider({ children }: { children: ReactNode }) {
       monthlyNet,
       monthlyMortgagePayment,
       monthlyMaintenanceExpense,
+      monthlyBusinessIncome,
+      monthlyInvestmentIncome,
+      portfolioValue,
+      unlockedCommercial,
+      unlockedStockMarket,
+      unlockedBusiness,
       activeEvent,
       gameOver,
       log,
@@ -556,6 +649,12 @@ export function GameProvider({ children }: { children: ReactNode }) {
       monthlyNet,
       monthlyMortgagePayment,
       monthlyMaintenanceExpense,
+      monthlyBusinessIncome,
+      monthlyInvestmentIncome,
+      portfolioValue,
+      unlockedCommercial,
+      unlockedStockMarket,
+      unlockedBusiness,
       activeEvent,
       gameOver,
       log,
