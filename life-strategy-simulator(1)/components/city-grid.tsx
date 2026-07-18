@@ -1,15 +1,14 @@
 'use client'
 
 import { MapPin, Home, Coins, Plane, CheckCircle2 } from 'lucide-react'
-import { CITIES, useGame } from '@/components/game-provider'
+import { CITIES, FINANCING_OPTIONS, useGame } from '@/components/game-provider'
 import {
-  DOWN_PAYMENT_RATE,
-  RELOCATION_COST,
   formatMoney,
   type City,
 } from '@/lib/game-data'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { useState } from 'react'
 
 export function CityGrid() {
   const { player, relocate, buyProperty } = useGame()
@@ -33,7 +32,7 @@ export function CityGrid() {
               player.propertiesOwned.filter((p) => p.city === city.name).length
             }
             onRelocate={() => relocate(city.name)}
-            onBuy={() => buyProperty(city.name)}
+            onBuy={buyProperty}
           />
         ))}
       </div>
@@ -54,11 +53,9 @@ function CityCard({
   cash: number
   ownedCount: number
   onRelocate: () => void
-  onBuy: () => void
+  onBuy: (cityName: string, financingOptionId: string) => void
 }) {
-  const downPayment = Math.round(city.avgProperty * DOWN_PAYMENT_RATE)
-  const canRelocate = cash >= RELOCATION_COST
-  const canBuy = cash >= downPayment
+  const [showFinancingOptions, setShowFinancingOptions] = useState(false)
 
   return (
     <div
@@ -96,23 +93,79 @@ function CityCard({
         <EconStat label="Rent/mo" value={formatMoney(city.avgRent)} accent />
       </dl>
 
+      <p className="mt-2 text-xs text-muted-foreground">
+        Growth: +{(city.appreciationRate * 12 * 100).toFixed(1)}%/year
+      </p>
+
       <div className="mt-5 flex-1" />
 
       {isHere ? (
         <div>
-          <Button
-            className="w-full"
-            onClick={onBuy}
-            disabled={!canBuy}
-          >
-            <Coins className="size-4" />
-            Buy Rental — {formatMoney(downPayment)} down
-          </Button>
-          {!canBuy && (
-            <p className="mt-2 text-center text-xs text-destructive">
-              Need {formatMoney(downPayment)} cash for the 20% down payment.
-            </p>
+          {!showFinancingOptions ? (
+            <Button
+              className="w-full"
+              onClick={() => setShowFinancingOptions(true)}
+              disabled={!FINANCING_OPTIONS.some(
+                (f) => cash >= city.avgProperty * f.downPaymentPercent,
+              )}
+            >
+              <Coins className="size-4" />
+              Buy Rental Property
+            </Button>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                Choose financing:
+              </p>
+              {FINANCING_OPTIONS.map((option) => {
+                const downPayment = Math.round(
+                  city.avgProperty * option.downPaymentPercent,
+                )
+                const canAfford = cash >= downPayment
+                return (
+                  <button
+                    key={option.id}
+                    onClick={() => {
+                      onBuy(city.name, option.id)
+                      setShowFinancingOptions(false)
+                    }}
+                    disabled={!canAfford}
+                    className={`w-full rounded-lg border p-2 text-left text-xs transition-colors ${
+                      canAfford
+                        ? 'border-border bg-secondary/60 hover:bg-secondary'
+                        : 'border-border/50 bg-muted/50 opacity-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium">{option.label}</span>
+                      <span className="font-mono text-primary">
+                        {formatMoney(downPayment)} down
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[10px] text-muted-foreground">
+                      {option.description}
+                    </p>
+                  </button>
+                )
+              })}
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full text-xs"
+                onClick={() => setShowFinancingOptions(false)}
+              >
+                Cancel
+              </Button>
+            </div>
           )}
+          {!showFinancingOptions &&
+            !FINANCING_OPTIONS.some(
+              (f) => cash >= city.avgProperty * f.downPaymentPercent,
+            ) && (
+              <p className="mt-2 text-center text-xs text-destructive">
+                Not enough cash for any down payment option.
+              </p>
+            )}
         </div>
       ) : (
         <div>
@@ -120,12 +173,12 @@ function CityCard({
             variant="outline"
             className="w-full"
             onClick={onRelocate}
-            disabled={!canRelocate}
+            disabled={cash < 2000}
           >
             <Plane className="size-4" />
-            Relocate (Costs {formatMoney(RELOCATION_COST)})
+            Relocate (Costs {formatMoney(2000)})
           </Button>
-          {!canRelocate && (
+          {cash < 2000 && (
             <p className="mt-2 text-center text-xs text-destructive">
               Not enough cash to relocate.
             </p>
